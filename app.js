@@ -1517,10 +1517,10 @@
     if (isMask) {
       html += `<div class="formula-section-head">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="7" height="18" rx="1"/><rect x="14" y="3" width="7" height="18" rx="1"/></svg>
-        Masking Mode — Physical Slices (Project 294 Architecture)
+        Masking Mode — Physical Slices (Connected Group &amp; Mask Slicing)
       </div>`;
       html += `<div class="formula-callout">
-        <strong>Masking Mode active:</strong> Instead of Alight Motion's <code>wipe2</code> effect, the 4:5 rectangle is physically partitioned into <strong>${n}</strong> discrete <code>.rect</code> shapes. Base AM vector size is 200×200 pt (half-extents 100×100).
+        <strong>Masking Mode active:</strong> Instead of Alight Motion's <code>wipe2</code> effect, each slice layer is an isolated Group &amp; Mask (<code>&lt;embedScene&gt;</code>) containing the full media image masked by a <code>blending="mask"</code> stencil. All <strong>${n}</strong> slice layers connect together into one seamless image.
       </div>`;
 
       html += `<div class="formula-line"><span class="formula-label">Slicing Mode</span><span class="formula-expr" style="color:var(--cyan)">MASKING (SEPARATE SHAPES)</span></div>`;
@@ -1598,8 +1598,8 @@
   }
 
   // ---- Alight Motion XML Generation ----
-  function generateAlightMotionXML() {
-    const layers = calculateLayers();
+  function generateAlightMotionXML(overrideLayers) {
+    const layers = overrideLayers || calculateLayers();
     const t = '  '; // indent
     const totalTimeMs = Math.round(parseTimeToSeconds(state.projectDurationStr) * 1000);
     const fps = state.fps;
@@ -1613,9 +1613,6 @@
     xml += `Created by ALIGHT MOTION XMLS Rectangle Wipe Generator\n`;
     xml += `Exported: ${new Date().toLocaleString()}\n`;
     xml += `-->\n`;
-
-    const isEmbed = state.wipeMethod === 'mask' && state.maskEmbedScene;
-    const baseIndent = isEmbed ? `${t}${t}` : `${t}`;
 
     const sceneTitle = state.wipeMethod === 'mask'
       ? `Project Name Masking ${layers.length}x`
@@ -1633,65 +1630,205 @@
       xml += `${t}<media uri="${videoUri}" type="video/mp4" duration="${dur}" fps="${fps}" width="${state.projectWidth}" height="${state.projectHeight}"/>\n`;
     }
 
-    if (isEmbed) {
-      xml += `${t}<embedScene id="${layers.length + 1}" label="Seperate Rectangle" startTime="0" endTime="${totalTimeMs}" fillType="intrinsic">\n`;
-      xml += `${t}${t}<transform>\n`;
-      xml += `${t}${t}${t}<location value="${(state.projectWidth / 2).toFixed(6)},${(state.projectHeight / 2).toFixed(6)},0.000000"/>\n`;
-      xml += `${t}${t}</transform>\n`;
-      xml += `${t}${t}<fillColor value="#FF000000"/>\n`;
-      xml += `${t}${t}<scene title="" width="${state.projectWidth + 2}" height="${state.projectHeight + 2}" exportWidth="${state.projectWidth + 2}" exportHeight="${state.projectHeight + 2}" bgcolor="#00000000" totalTime="${totalTimeMs}" fps="${fps}" modifiedTime="0" amver="868" ffver="107" am="com.alightcreative.motion/6.2.59" amplatform="ios" precompose="dynamicResolution" retime="off">\n`;
-    }
+    // Helper to generate 3D rotation & orient effects (flip3, cube2, box)
+    function generateEffectsXml(layer, indent) {
+      if (state.animType !== 'flip' && state.animType !== 'cube' && state.animType !== 'box') {
+        return '';
+      }
+      let effXml = '';
+      const projDurationSec = parseTimeToSeconds(state.projectDurationStr) || 1;
+      const normStart = layer.flipStartT / projDurationSec;
+      const normEnd = layer.flipEndT / projDurationSec;
 
-    const effAngle = state.splitDirection === 'horizontal' ? 90 : 0;
+      let easingStr = '';
+      if (layer.flipEasing) {
+        const bezierParts = layer.flipEasing.split(',').map(s => s.trim());
+        easingStr = ` e="cubicBezier ${bezierParts.join(' ')}"`;
+      }
+
+      if (state.animType === 'flip') {
+        effXml += `${indent}<effect id="com.alightcreative.effects.flip3" locallyApplied="true">\n`;
+        effXml += `${indent}${t}<property name="axis" type="float" value="${layer.flipAxis.toFixed(6)}"/>\n`;
+        effXml += `${indent}${t}<property name="pivot" type="vec2" value="${layer.pivotX.toFixed(6)},${layer.pivotY.toFixed(6)}"/>\n`;
+        effXml += `${indent}${t}<property name="angle" type="float">\n`;
+        effXml += `${indent}${t}${t}<kf t="${normStart.toFixed(6)}" v="${layer.flipStartAngle.toFixed(6)}" />\n`;
+        effXml += `${indent}${t}${t}<kf t="${normEnd.toFixed(6)}" v="${layer.flipEndAngle.toFixed(6)}"${easingStr} />\n`;
+        effXml += `${indent}${t}</property>\n`;
+        effXml += `${indent}</effect>\n`;
+      } else if (state.animType === 'cube') {
+        const isHorizontalSplit = state.splitDirection === 'horizontal';
+        const maskCubeReferenceWidth = isHorizontalSplit ? 625 : 78.1;
+        const maskCubeReferenceHeight = isHorizontalSplit ? 78.1 : 625;
+        const maskCubeReferenceScale = 1.97;
+        const MASK_CUBE_CALIBRATION_LAYERS = 5;
+        const calibTileW = (isHorizontalSplit
+          ? state.solidWidth
+          : state.solidWidth / MASK_CUBE_CALIBRATION_LAYERS) + (MASK_SEAM_OVERSCAN_PX * 2);
+        const calibTileH = (isHorizontalSplit
+          ? state.solidHeight / MASK_CUBE_CALIBRATION_LAYERS
+          : state.solidHeight) + (MASK_SEAM_OVERSCAN_PX * 2);
+        const maskCubeAreaRatio = (calibTileW * calibTileH) /
+          (maskCubeReferenceWidth * maskCubeReferenceHeight);
+        const cubeScale = state.wipeMethod === 'mask'
+          ? maskCubeReferenceScale * Math.sqrt(Math.max(maskCubeAreaRatio, 0))
+          : 1.32 * (layer.width / (state.projectWidth * (650 / 1080)));
+        
+        const cubeWidth = state.projectWidth / 1000;
+        const cubeHeight = state.wipeMethod === 'mask' && state.splitDirection !== 'horizontal'
+          ? 1.056
+          : state.projectHeight / 1000;
+        const cubeDepth = state.projectWidth / 1000;
+        
+        effXml += `${indent}<effect id="com.alightcreative.effects.cube2" locallyApplied="true">\n`;
+        effXml += `${indent}${t}<property name="depth" type="float" value="${cubeDepth.toFixed(6)}"/>\n`;
+        effXml += `${indent}${t}<property name="height" type="float" value="${cubeHeight.toFixed(6)}"/>\n`;
+        effXml += `${indent}${t}<property name="rotate" type="vec3">\n`;
+        effXml += `${indent}${t}${t}<kf t="${normStart.toFixed(6)}" v="${layer.cubeXStart.toFixed(6)},${layer.cubeYStart.toFixed(6)},${layer.cubeZStart.toFixed(6)}" />\n`;
+        effXml += `${indent}${t}${t}<kf t="${normEnd.toFixed(6)}" v="${layer.cubeXEnd.toFixed(6)},${layer.cubeYEnd.toFixed(6)},${layer.cubeZEnd.toFixed(6)}"${easingStr} />\n`;
+        effXml += `${indent}${t}</property>\n`;
+        effXml += `${indent}${t}<property name="position" type="vec3" value="0.000000,0.000000,0.000000"/>\n`;
+        effXml += `${indent}${t}<property name="scale" type="float" value="${cubeScale.toFixed(6)}"/>\n`;
+        effXml += `${indent}${t}<property name="shadingType" type="int" value="0"/>\n`;
+        effXml += `${indent}${t}<property name="width" type="float" value="${cubeWidth.toFixed(6)}"/>\n`;
+        effXml += `${indent}</effect>\n`;
+      } else if (state.animType === 'box') {
+        effXml += `${indent}<effect id="com.alightcreative.effects.box" locallyApplied="true">\n`;
+        effXml += `${indent}${t}<property name="depth" type="float" value="${state.box.depth.toFixed(6)}"/>\n`;
+        effXml += `${indent}${t}<property name="scale" type="float" value="${state.box.scale.toFixed(6)}"/>\n`;
+
+        const normOrientStart = layer.orientStartT / projDurationSec;
+        const normOrientEnd = layer.orientEndT / projDurationSec;
+        const startQuat = eulerToQuaternion(state.box.orientStartX, state.box.orientStartY, state.box.orientStartZ);
+        const endQuat = eulerToQuaternion(state.box.orientEndX, state.box.orientEndY, state.box.orientEndZ);
+        const orientEasingStr = ` e="cubicBezier ${state.box.orientEasing.replace(/, /g, ' ')}"`;
+        const rotateEasingStr = ` e="cubicBezier ${state.box.rotateEasing.replace(/, /g, ' ')}"`;
+
+        effXml += `${indent}${t}<property name="orient" type="quat">\n`;
+        effXml += `${indent}${t}${t}<kf t="${normOrientStart.toFixed(6)}" v="${startQuat.w.toFixed(6)},${startQuat.x.toFixed(6)},${startQuat.y.toFixed(6)},${startQuat.z.toFixed(6)}" />\n`;
+        effXml += `${indent}${t}${t}<kf t="${normOrientEnd.toFixed(6)}" v="${endQuat.w.toFixed(6)},${endQuat.x.toFixed(6)},${endQuat.y.toFixed(6)},${endQuat.z.toFixed(6)}" ${orientEasingStr} />\n`;
+        effXml += `${indent}${t}</property>\n`;
+
+        const normRotateStart = layer.rotateStartT / projDurationSec;
+        const normRotateEnd = layer.rotateEndT / projDurationSec;
+
+        effXml += `${indent}${t}<property name="rotate" type="vec3">\n`;
+        effXml += `${indent}${t}${t}<kf t="${normRotateStart.toFixed(6)}" v="${state.box.rotateStartX.toFixed(6)},${state.box.rotateStartY.toFixed(6)},${state.box.rotateStartZ.toFixed(6)}" />\n`;
+        effXml += `${indent}${t}${t}<kf t="${normRotateEnd.toFixed(6)}" v="${state.box.rotateEndX.toFixed(6)},${state.box.rotateEndY.toFixed(6)},${state.box.rotateEndZ.toFixed(6)}" ${rotateEasingStr} />\n`;
+        effXml += `${indent}${t}</property>\n`;
+
+        effXml += `${indent}${t}<property name="height" type="float" value="1.0"/>\n`;
+        effXml += `${indent}${t}<property name="shadingType" type="int" value="1"/>\n`;
+        effXml += `${indent}</effect>\n`;
+      }
+      return effXml;
+    }
 
     // Generate layers in reverse so layer 1 is at the bottom (matching AM export order)
     for (let i = layers.length - 1; i >= 0; i--) {
       const layer = layers[i];
       const layerLabel = i === 0 ? "Rectangle 1" : `Rectangle 1 Copy${i > 1 ? ' ' + i : ''}`;
 
-      let finalLocX = layer.locX;
-      let finalLocY = layer.locY;
-      let finalScaleX = 1.0;
-      let finalScaleY = 1.0;
-      let finalSizeX = layer.width / 2;
-      let finalSizeY = layer.height / 2;
-
-      // For mask method, we use absolute positioning and calculate scale from a base size.
       if (state.wipeMethod === 'mask') {
-        finalSizeX = 100.0;
-        finalSizeY = 100.0;
-        finalScaleX = layer.width / 200.0;
-        finalScaleY = layer.height / 200.0;
-      }
+        // Group & Mask architecture: Each layer is an <embedScene> containing:
+        // Shape 1 (Media/Solid): full solid dimensions, positioned with offset so the slice window reveals its part of the connected whole.
+        // Shape 2 (Mask): matching slice dimensions with blending="mask" to stencil the window.
+        const tileW = layer.width;
+        const tileH = layer.height;
+        const cx = tileW / 2.0;
+        const cy = tileH / 2.0;
+        // In project coordinates, solid center is (projectWidth/2, projectHeight/2) and slice center is (layer.locX, layer.locY).
+        const offsetX = (state.projectWidth / 2.0) - layer.locX;
+        const offsetY = (state.projectHeight / 2.0) - layer.locY;
+        const mediaLocX = cx + offsetX;
+        const mediaLocY = cy + offsetY;
 
-      const fillAttrs = useVideo
-        ? `fillType="media" fillVideo="${videoUri}" mediaFillMode="fill"`
-        : `fillType="color"`;
-      xml += `${t}<shape id="${layer.index}" label="${layerLabel}" startTime="0" endTime="${totalTimeMs}" ${fillAttrs} s=".rect">\n`;
-
-      xml += `${t}${t}<transform>\n`;
-      if (layer.moveEnabled) {
-        let easingAttr = '';
-        if (layer.moveEasing) {
-          const bezierParts = layer.moveEasing.replace(/,/g, ' ').trim().split(/\s+/);
-          easingAttr = ` e="cubicBezier ${bezierParts.join(' ')}"`;
+        xml += `${t}<embedScene id="${layer.index}" label="${layerLabel}" startTime="0" endTime="${totalTimeMs}" fillType="intrinsic">\n`;
+        xml += `${t}${t}<transform>\n`;
+        if (layer.moveEnabled) {
+          let easingAttr = '';
+          if (layer.moveEasing) {
+            const bezierParts = layer.moveEasing.replace(/,/g, ' ').trim().split(/\s+/);
+            easingAttr = ` e="cubicBezier ${bezierParts.join(' ')}"`;
+          }
+          const projDurationSec = parseTimeToSeconds(state.projectDurationStr) || 1;
+          const normStart = layer.flipStartT / projDurationSec;
+          const normEnd = layer.flipEndT / projDurationSec;
+          xml += `${t}${t}${t}<location>\n`;
+          xml += `${t}${t}${t}${t}<kf t="${normStart.toFixed(6)}" v="${layer.moveStartX.toFixed(6)},${layer.moveStartY.toFixed(6)},0.000000"/>\n`;
+          xml += `${t}${t}${t}${t}<kf t="${normEnd.toFixed(6)}" v="${layer.moveEndX.toFixed(6)},${layer.moveEndY.toFixed(6)},0.000000"${easingAttr}/>\n`;
+          xml += `${t}${t}${t}</location>\n`;
+        } else {
+          xml += `${t}${t}${t}<location value="${layer.locX.toFixed(6)},${layer.locY.toFixed(6)},0.000000"/>\n`;
         }
-        const projDurationSec = parseTimeToSeconds(state.projectDurationStr) || 1;
-        const normStart = layer.flipStartT / projDurationSec;
-        const normEnd = layer.flipEndT / projDurationSec;
-        xml += `${t}${t}${t}<location>\n`;
-        xml += `${t}${t}${t}${t}<kf t="${normStart.toFixed(6)}" v="${layer.moveStartX.toFixed(6)},${layer.moveStartY.toFixed(6)},0.000000"/>\n`;
-        xml += `${t}${t}${t}${t}<kf t="${normEnd.toFixed(6)}" v="${layer.moveEndX.toFixed(6)},${layer.moveEndY.toFixed(6)},0.000000"${easingAttr}/>\n`;
-        xml += `${t}${t}${t}</location>\n`;
+        xml += `${t}${t}${t}<scale value="1.000000,1.000000"/>\n`;
+        xml += `${t}${t}</transform>\n`;
+
+        // 3D effects on the embedScene
+        xml += generateEffectsXml(layer, `${t}${t}`);
+
+        xml += `${t}${t}<fillColor value="#FF000000"/>\n`;
+        xml += `${t}${t}<scene title="" width="${Math.round(tileW)}" height="${Math.round(tileH)}" exportWidth="${Math.round(tileW)}" exportHeight="${Math.round(tileH)}" bgcolor="#00000000" totalTime="${totalTimeMs}" fps="${fps}" modifiedTime="0" amver="868" ffver="107" am="com.alightcreative.motion/6.2.59" amplatform="ios" precompose="dynamicResolution" retime="off">\n`;
+
+        // Inner Shape 1: Media / Solid layer
+        const innerFillAttrs = useVideo
+          ? `fillType="media" fillVideo="${videoUri}" mediaFillMode="fill"`
+          : `fillType="color"`;
+        xml += `${t}${t}${t}<shape id="1" label="${layerLabel} Media" startTime="0" endTime="${totalTimeMs}" ${innerFillAttrs} s=".rect">\n`;
+        xml += `${t}${t}${t}${t}<transform>\n`;
+        xml += `${t}${t}${t}${t}${t}<location value="${mediaLocX.toFixed(6)},${mediaLocY.toFixed(6)},0.000000"/>\n`;
+        xml += `${t}${t}${t}${t}</transform>\n`;
+        if (!useVideo) {
+          xml += `${t}${t}${t}${t}<fillColor value="${amColor}"/>\n`;
+        }
+        xml += `${t}${t}${t}${t}<property name="size" type="vec2" value="${(state.solidWidth / 2.0).toFixed(6)},${(state.solidHeight / 2.0).toFixed(6)}"/>\n`;
+        xml += `${t}${t}${t}</shape>\n`;
+
+        // Inner Shape 2: Mask Stencil
+        xml += `${t}${t}${t}<shape id="2" label="${layerLabel} Mask" startTime="0" endTime="${totalTimeMs}" fillType="color" blending="mask" s=".rect">\n`;
+        xml += `${t}${t}${t}${t}<transform>\n`;
+        xml += `${t}${t}${t}${t}${t}<location value="${cx.toFixed(6)},${cy.toFixed(6)},0.000000"/>\n`;
+        xml += `${t}${t}${t}${t}${t}<scale value="${(tileW / 200.0).toFixed(6)},${(tileH / 200.0).toFixed(6)}"/>\n`;
+        xml += `${t}${t}${t}${t}</transform>\n`;
+        xml += `${t}${t}${t}${t}<fillColor value="#FFFFFFFF"/>\n`;
+        xml += `${t}${t}${t}</shape>\n`;
+
+        xml += `${t}${t}</scene>\n`;
+        xml += `${t}</embedScene>\n`;
+
       } else {
-        xml += `${t}${t}${t}<location value="${finalLocX.toFixed(6)},${finalLocY.toFixed(6)},0.000000"/>\n`;
-      }
-      xml += `${t}${t}${t}<scale value="${finalScaleX.toFixed(6)},${finalScaleY.toFixed(6)}"/>\n`;
-      xml += `${t}${t}</transform>\n`;
+        // Wipe Method: Shape with wipe2 effect (full solid dimensions)
+        let finalLocX = layer.locX;
+        let finalLocY = layer.locY;
+        let finalScaleX = 1.0;
+        let finalScaleY = 1.0;
 
-      if (!useVideo) xml += `${t}${t}<fillColor value="${amColor}"/>\n`;
+        const fillAttrs = useVideo
+          ? `fillType="media" fillVideo="${videoUri}" mediaFillMode="fill"`
+          : `fillType="color"`;
+        xml += `${t}<shape id="${layer.index}" label="${layerLabel}" startTime="0" endTime="${totalTimeMs}" ${fillAttrs} s=".rect">\n`;
 
-      if (state.wipeMethod === 'wipe') {
+        xml += `${t}${t}<transform>\n`;
+        if (layer.moveEnabled) {
+          let easingAttr = '';
+          if (layer.moveEasing) {
+            const bezierParts = layer.moveEasing.replace(/,/g, ' ').trim().split(/\s+/);
+            easingAttr = ` e="cubicBezier ${bezierParts.join(' ')}"`;
+          }
+          const projDurationSec = parseTimeToSeconds(state.projectDurationStr) || 1;
+          const normStart = layer.flipStartT / projDurationSec;
+          const normEnd = layer.flipEndT / projDurationSec;
+          xml += `${t}${t}${t}<location>\n`;
+          xml += `${t}${t}${t}${t}<kf t="${normStart.toFixed(6)}" v="${layer.moveStartX.toFixed(6)},${layer.moveStartY.toFixed(6)},0.000000"/>\n`;
+          xml += `${t}${t}${t}${t}<kf t="${normEnd.toFixed(6)}" v="${layer.moveEndX.toFixed(6)},${layer.moveEndY.toFixed(6)},0.000000"${easingAttr}/>\n`;
+          xml += `${t}${t}${t}</location>\n`;
+        } else {
+          xml += `${t}${t}${t}<location value="${finalLocX.toFixed(6)},${finalLocY.toFixed(6)},0.000000"/>\n`;
+        }
+        xml += `${t}${t}${t}<scale value="${finalScaleX.toFixed(6)},${finalScaleY.toFixed(6)}"/>\n`;
+        xml += `${t}${t}</transform>\n`;
+
+        if (!useVideo) xml += `${t}${t}<fillColor value="${amColor}"/>\n`;
+
         if (layer.wipeYStart > 0.0 || layer.wipeYEnd < 1.0) {
           xml += `${t}${t}<effect id="com.alightcreative.effects.wipe2" locallyApplied="true">\n`;
           if (layer.wipeYEnd < 1.0) xml += `${t}${t}${t}<property name="end" type="float" value="${layer.wipeYEnd.toFixed(6)}"/>\n`;
@@ -1706,150 +1843,17 @@
           xml += `${t}${t}${t}<property name="angle" type="float" value="0.000000"/>\n`;
           xml += `${t}${t}</effect>\n`;
         }
-      }
 
-      if (state.animType === 'flip' || state.animType === 'cube' || state.animType === 'box') {
-        // AM keyframes use a normalized time (0.0 to 1.0) relative to the layer's duration
-        const projDurationSec = parseTimeToSeconds(state.projectDurationStr) || 1;
-        const normStart = layer.flipStartT / projDurationSec;
-        const normEnd = layer.flipEndT / projDurationSec;
+        xml += generateEffectsXml(layer, `${t}${t}`);
 
-        let easingStr = '';
-        if (layer.flipEasing) {
-          const bezierParts = layer.flipEasing.split(',').map(s => s.trim());
-          easingStr = ` e="cubicBezier ${bezierParts.join(' ')}"`;
-        }
-
-        if (state.animType === 'flip') {
-          // Flip Layer Effect
-          xml += `${t}${t}<effect id="com.alightcreative.effects.flip3" locallyApplied="true">\n`;
-          xml += `${t}${t}${t}<property name="axis" type="float" value="${layer.flipAxis.toFixed(6)}"/>\n`;
-          xml += `${t}${t}${t}<property name="pivot" type="vec2" value="${layer.pivotX.toFixed(6)},${layer.pivotY.toFixed(6)}"/>\n`;
-          xml += `${t}${t}${t}<property name="angle" type="float">\n`;
-          xml += `${t}${t}${t}${t}<kf t="${normStart.toFixed(6)}" v="${layer.flipStartAngle.toFixed(6)}" />\n`;
-          xml += `${t}${t}${t}${t}<kf t="${normEnd.toFixed(6)}" v="${layer.flipEndAngle.toFixed(6)}"${easingStr} />\n`;
-          xml += `${t}${t}${t}</property>\n`;
-          xml += `${t}${t}</effect>\n`;
-        } else if (state.animType === 'cube') {
-          // Cube Effect
-          // Mask layers use a 100 x 100 base shape, so calibrate the cube from
-          // the known-good 625 x 78.1 layer rather than from the full project.
-          // For vertical cuts the reference axes are swapped. This keeps the
-          // same correction when the split direction changes:
-          //   cubeScale = 1.97 * sqrt((tileW * tileH) / (refW * refH))
-          //
-          // The cube effect is evaluated in the shape's local 200 x 200 space
-          // and only afterwards stretched to the tile by the transform scale.
-          // Its scale must therefore be the SAME for every tile and must not
-          // change with the layer / sub-section / section count; otherwise
-          // each cube shrinks or grows inside its tile and the combined stack
-          // loses its aspect ratio. We always evaluate the calibration using
-          // the tile a single-section, single-sub-section, 5-layer split
-          // would produce (the configuration the calibration was tuned on).
-          const isHorizontalSplit = state.splitDirection === 'horizontal';
-          const maskCubeReferenceWidth = isHorizontalSplit ? 625 : 78.1;
-          const maskCubeReferenceHeight = isHorizontalSplit ? 78.1 : 625;
-          const maskCubeReferenceScale = 1.97;
-          const MASK_CUBE_CALIBRATION_LAYERS = 5;
-          const calibTileW = (isHorizontalSplit
-            ? state.solidWidth
-            : state.solidWidth / MASK_CUBE_CALIBRATION_LAYERS) + (MASK_SEAM_OVERSCAN_PX * 2);
-          const calibTileH = (isHorizontalSplit
-            ? state.solidHeight / MASK_CUBE_CALIBRATION_LAYERS
-            : state.solidHeight) + (MASK_SEAM_OVERSCAN_PX * 2);
-          const maskCubeAreaRatio = (calibTileW * calibTileH) /
-            (maskCubeReferenceWidth * maskCubeReferenceHeight);
-          const cubeScale = state.wipeMethod === 'mask'
-            ? maskCubeReferenceScale * Math.sqrt(Math.max(maskCubeAreaRatio, 0))
-            : 1.32 * (layer.width / (state.projectWidth * (650 / 1080)));
-          
-          const cubeWidth = state.projectWidth / 1000;
-          const cubeHeight = state.wipeMethod === 'mask' && state.splitDirection !== 'horizontal'
-            ? 1.056
-            : state.projectHeight / 1000;
-          const cubeDepth = state.projectWidth / 1000;
-          
-          xml += `${t}${t}<effect id="com.alightcreative.effects.cube2" locallyApplied="true">\n`;
-          xml += `${t}${t}${t}<property name="depth" type="float" value="${cubeDepth.toFixed(6)}"/>\n`;
-          xml += `${t}${t}${t}<property name="height" type="float" value="${cubeHeight.toFixed(6)}"/>\n`;
-          
-          // Rotation (X, Y, Z)
-          xml += `${t}${t}${t}<property name="rotate" type="vec3">\n`;
-          
-          xml += `${t}${t}${t}${t}<kf t="${normStart.toFixed(6)}" v="${layer.cubeXStart.toFixed(6)},${layer.cubeYStart.toFixed(6)},${layer.cubeZStart.toFixed(6)}" />\n`;
-          
-          xml += `${t}${t}${t}${t}<kf t="${normEnd.toFixed(6)}" v="${layer.cubeXEnd.toFixed(6)},${layer.cubeYEnd.toFixed(6)},${layer.cubeZEnd.toFixed(6)}"${easingStr} />\n`;
-          
-          xml += `${t}${t}${t}</property>\n`;
-          
-          xml += `${t}${t}${t}<property name="position" type="vec3" value="0.000000,0.000000,0.000000"/>\n`;
-          xml += `${t}${t}${t}<property name="scale" type="float" value="${cubeScale.toFixed(6)}"/>\n`;
-          xml += `${t}${t}${t}<property name="shadingType" type="int" value="0"/>\n`;
-          xml += `${t}${t}${t}<property name="width" type="float" value="${cubeWidth.toFixed(6)}"/>\n`;
-          xml += `${t}${t}</effect>\n`;
-
-        } else if (state.animType === 'box') {
-          // Box Effect
-          xml += `${t}${t}<effect id="com.alightcreative.effects.box" locallyApplied="true">\n`;
-          xml += `${t}${t}${t}<property name="depth" type="float" value="${state.box.depth.toFixed(6)}"/>\n`;
-          xml += `${t}${t}${t}<property name="scale" type="float" value="${state.box.scale.toFixed(6)}"/>\n`;
-
-          // --- Orientation ---
-          const normOrientStart = layer.orientStartT / projDurationSec;
-          const normOrientEnd = layer.orientEndT / projDurationSec;
-          const startQuat = eulerToQuaternion(state.box.orientStartX, state.box.orientStartY, state.box.orientStartZ);
-          const endQuat = eulerToQuaternion(state.box.orientEndX, state.box.orientEndY, state.box.orientEndZ);
-          const orientEasingStr = ` e="cubicBezier ${state.box.orientEasing.replace(/, /g, ' ')}"`;
-          const rotateEasingStr = ` e="cubicBezier ${state.box.rotateEasing.replace(/, /g, ' ')}"`;
-
-          xml += `${t}${t}${t}<property name="orient" type="quat">\n`;
-          xml += `${t}${t}${t}${t}<kf t="${normOrientStart.toFixed(6)}" v="${startQuat.w.toFixed(6)},${startQuat.x.toFixed(6)},${startQuat.y.toFixed(6)},${startQuat.z.toFixed(6)}" />\n`;
-          xml += `${t}${t}${t}${t}<kf t="${normOrientEnd.toFixed(6)}" v="${endQuat.w.toFixed(6)},${endQuat.x.toFixed(6)},${endQuat.y.toFixed(6)},${endQuat.z.toFixed(6)}" ${orientEasingStr} />\n`;
-          xml += `${t}${t}${t}</property>\n`;
-
-          // --- Rotation ---
-          const normRotateStart = layer.rotateStartT / projDurationSec;
-          const normRotateEnd = layer.rotateEndT / projDurationSec;
-
-          xml += `${t}${t}${t}<property name="rotate" type="vec3">\n`;
-          xml += `${t}${t}${t}${t}<kf t="${normRotateStart.toFixed(6)}" v="${state.box.rotateStartX.toFixed(6)},${state.box.rotateStartY.toFixed(6)},${state.box.rotateStartZ.toFixed(6)}" />\n`;
-          xml += `${t}${t}${t}${t}<kf t="${normRotateEnd.toFixed(6)}" v="${state.box.rotateEndX.toFixed(6)},${state.box.rotateEndY.toFixed(6)},${state.box.rotateEndZ.toFixed(6)}" ${rotateEasingStr} />\n`;
-          xml += `${t}${t}${t}</property>\n`;
-
-          xml += `${t}${t}${t}<property name="height" type="float" value="1.0"/>\n`;
-          xml += `${t}${t}${t}<property name="shadingType" type="int" value="1"/>\n`;
-          xml += `${t}${t}${t}<property name="shadingType" type="int" value="1"/>\n`;
-
-          xml += `${t}${t}</effect>\n`;
-        }
-      }
-
-      // In AM native vector shapes (.rect), size is omitted in mask mode to match Project 294
-      if (state.wipeMethod !== 'mask') {
         if (state.animType === 'cube') {
-          xml += `${baseIndent}${t}<property name="size" type="vec2" value="${(state.projectWidth / 2).toFixed(6)},${(state.projectHeight / 2).toFixed(6)}"/>\n`;
+          xml += `${t}${t}<property name="size" type="vec2" value="${(state.projectWidth / 2).toFixed(6)},${(state.projectHeight / 2).toFixed(6)}"/>\n`;
         } else {
-          xml += `${baseIndent}${t}<property name="size" type="vec2" value="${(layer.width / 2).toFixed(6)},${(layer.height / 2).toFixed(6)}"/>\n`;
+          xml += `${t}${t}<property name="size" type="vec2" value="${(layer.width / 2).toFixed(6)},${(layer.height / 2).toFixed(6)}"/>\n`;
         }
+
+        xml += `${t}</shape>\n`;
       }
-
-      xml += `${baseIndent}</shape>\n`;
-    }
-
-    if (isEmbed) {
-      xml += `${t}${t}</scene>\n`;
-      xml += `${t}</embedScene>\n`;
-
-      // Outside reference shape "Rectangle to fit" (matching Project Name 294)
-      const wholeScaleX = state.solidWidth / 200.0;
-      const wholeScaleY = state.solidHeight / 200.0;
-      xml += `${t}<shape id="${layers.length + 2}" label="Rectangle to fit" startTime="0" endTime="${totalTimeMs}" fillType="color" s=".rect">\n`;
-      xml += `${t}${t}<transform>\n`;
-      xml += `${t}${t}${t}<location value="${(state.projectWidth / 2).toFixed(6)},${(state.projectHeight / 2).toFixed(6)},0.000000"/>\n`;
-      xml += `${t}${t}${t}<scale value="${wholeScaleX.toFixed(6)},${wholeScaleY.toFixed(6)}"/>\n`;
-      xml += `${t}${t}</transform>\n`;
-      xml += `${t}${t}<fillColor value="${amColor}"/>\n`;
-      xml += `${t}</shape>\n`;
     }
 
     xml += `</scene>\n`;
@@ -2561,6 +2565,7 @@
     layers: [],
     mediaType: 'image/png',
     mediaUri: 'am-internal:///79E80CB55B8662B05AFDC24DB42B814BC455410A.PNG',
+    maskSlicing: 'connect',
     filterQuery: '',
   };
 
@@ -2582,6 +2587,7 @@
   const metaFps                 = $('#metaFps');
   const metaDuration            = $('#metaDuration');
   const mediaTypeToggle         = $('#mediaTypeToggle');
+  const maskSlicingToggle       = $('#maskSlicingToggle');
   const targetMediaUri          = $('#targetMediaUri');
   const btnSelectAllLayers      = $('#btnSelectAllLayers');
   const btnDeselectAllLayers    = $('#btnDeselectAllLayers');
@@ -2641,6 +2647,17 @@
     });
   }
 
+  function updateMaskSlicingToggleUI() {
+    if (!maskSlicingToggle) return;
+    maskSlicingToggle.querySelectorAll('.toggle-btn').forEach(btn => {
+      if (btn.dataset.value === converterState.maskSlicing) {
+        btn.classList.add('active');
+      } else {
+        btn.classList.remove('active');
+      }
+    });
+  }
+
   function loadXmlString(xmlString, filename = 'project.xml') {
     try {
       const cleanXml = xmlString.trim();
@@ -2689,16 +2706,30 @@
         }
       }
 
-      // Discover all shape layers
-      const shapeElements = Array.from(doc.querySelectorAll('shape'));
+      // Discover all shape layers, excluding mask stencils with blending="mask"
+      const allShapes = Array.from(doc.querySelectorAll('shape'));
+      const shapeElements = allShapes.filter(s => s.getAttribute('blending') !== 'mask');
 
       converterState.layers = shapeElements.map((shape, idx) => {
         const id = shape.getAttribute('id') || String(idx + 1);
-        const label = shape.getAttribute('label') || `Shape ${id}`;
+        const rawLabel = shape.getAttribute('label') || `Shape ${id}`;
         const shapeType = shape.getAttribute('s') || '.rect';
         const fillType = shape.getAttribute('fillType') || 'color';
         const fillImage = shape.getAttribute('fillImage') || '';
         const fillVideo = shape.getAttribute('fillVideo') || '';
+
+        // Check if inside an embedScene Group & Mask
+        const parentScene = shape.parentElement && shape.parentElement.tagName.toLowerCase() === 'scene' ? shape.parentElement : null;
+        const parentEmbed = parentScene && parentScene.parentElement && parentScene.parentElement.tagName.toLowerCase() === 'embedScene' ? parentScene.parentElement : null;
+        const isInsideMaskEmbed = parentScene && parentScene.querySelector('shape[blending="mask"]');
+
+        let displayLabel = rawLabel;
+        if (parentEmbed) {
+          const embedLabel = parentEmbed.getAttribute('label') || '';
+          if (embedLabel && !displayLabel.includes(embedLabel)) {
+            displayLabel = `${embedLabel} (${rawLabel})`;
+          }
+        }
 
         // Color extraction
         const fillColElem = shape.querySelector('fillColor');
@@ -2714,19 +2745,28 @@
 
         // Effects summary
         const effectNodes = Array.from(shape.querySelectorAll('effect'));
+        if (parentEmbed) {
+          effectNodes.push(...Array.from(parentEmbed.querySelectorAll(':scope > effect')));
+        }
         const effects = effectNodes.map(e => {
           const effId = e.getAttribute('id') || '';
           return effId.replace(/^com\.alightcreative\.effects\./, '');
         }).filter(Boolean);
+
+        if (isInsideMaskEmbed) {
+          effects.unshift('Group & Mask');
+        }
 
         const isMedia = fillType === 'media' || Boolean(fillImage) || Boolean(fillVideo);
 
         return {
           index: idx,
           id,
-          label,
+          label: displayLabel,
           shapeType,
           element: shape,
+          parentEmbed,
+          isInsideMaskEmbed: Boolean(isInsideMaskEmbed),
           originalFillType: fillType,
           originalFillImage: fillImage,
           originalFillVideo: fillVideo,
@@ -2841,11 +2881,14 @@
     const mediaType = converterState.mediaType || 'image/png';
     const isVideo = mediaType.startsWith('video');
 
-    const shapes = Array.from(doc.querySelectorAll('shape'));
+    // Discover non-mask shapes corresponding 1-to-1 with converterState.layers
+    const allShapes = Array.from(doc.querySelectorAll('shape'));
+    const nonMaskShapes = allShapes.filter(s => s.getAttribute('blending') !== 'mask');
     let anyMedia = false;
 
+    // Pass 1: Set media / color fill properties on selected shapes
     converterState.layers.forEach((layerState, idx) => {
-      const shape = shapes[idx];
+      const shape = nonMaskShapes[idx];
       if (!shape) return;
 
       if (layerState.isMedia) {
@@ -2878,6 +2921,215 @@
         }
       }
     });
+
+    // Pass 2: Connected Masking Mode alignment
+    // If maskSlicing === 'connect', ensure any standalone mask slices (no wipe2, no blending="mask" sibling)
+    // are wrapped into an <embedScene fillType="intrinsic"> Group & Mask with offset media and stencil.
+    if (converterState.maskSlicing === 'connect') {
+      const standaloneSlices = [];
+
+      converterState.layers.forEach((layerState, idx) => {
+        if (!layerState.isMedia) return;
+        const shape = nonMaskShapes[idx];
+        if (!shape) return;
+
+        // If shape already has wipe2, it slices the media natively
+        if (shape.querySelector('effect[id="com.alightcreative.effects.wipe2"]')) return;
+
+        // If shape is already inside an embedScene with a sibling blending="mask" stencil, it's already Group & Mask
+        const pScene = shape.parentElement && shape.parentElement.tagName.toLowerCase() === 'scene' ? shape.parentElement : null;
+        if (pScene && pScene.querySelector('shape[blending="mask"]')) return;
+
+        // Skip background reference shapes like "Rectangle to fit"
+        const lbl = (shape.getAttribute('label') || '').toLowerCase();
+        if (lbl.includes('to fit') || lbl.includes('reference')) return;
+
+        // Extract location and tile dimensions
+        const locElem = shape.querySelector('transform > location');
+        const scaleElem = shape.querySelector('transform > scale');
+        const sizeElem = shape.querySelector('property[name="size"]');
+
+        let lx = 0, ly = 0;
+        if (locElem && locElem.getAttribute('value')) {
+          const parts = locElem.getAttribute('value').split(',').map(Number);
+          lx = parts[0] || 0;
+          ly = parts[1] || 0;
+        }
+
+        let tw = 0, th = 0;
+        if (scaleElem && scaleElem.getAttribute('value')) {
+          const parts = scaleElem.getAttribute('value').split(',').map(Number);
+          tw = (parts[0] || 1) * 200.0;
+          th = (parts[1] || 1) * 200.0;
+        } else if (sizeElem && sizeElem.getAttribute('value')) {
+          const parts = sizeElem.getAttribute('value').split(',').map(Number);
+          tw = (parts[0] || 0) * 2.0;
+          th = (parts[1] || 0) * 2.0;
+        }
+
+        if (tw > 0 && th > 0) {
+          standaloneSlices.push({
+            shape,
+            lx, ly, tw, th,
+            minX: lx - tw / 2.0,
+            maxX: lx + tw / 2.0,
+            minY: ly - th / 2.0,
+            maxY: ly + th / 2.0,
+          });
+        }
+      });
+
+      if (standaloneSlices.length > 0) {
+        // Calculate bounding box of the composite image to slice
+        let fullW = 0, fullH = 0, originX = 0, originY = 0;
+
+        const refFitShape = doc.querySelector('shape[label*="to fit"], shape[label*="Rectangle to fit"]');
+        if (refFitShape) {
+          const rLoc = refFitShape.querySelector('transform > location');
+          const rScale = refFitShape.querySelector('transform > scale');
+          if (rLoc && rScale) {
+            const lp = rLoc.getAttribute('value').split(',').map(Number);
+            const sp = rScale.getAttribute('value').split(',').map(Number);
+            originX = lp[0] || 0;
+            originY = lp[1] || 0;
+            fullW = (sp[0] || 1) * 200.0;
+            fullH = (sp[1] || 1) * 200.0;
+          }
+        }
+
+        if (fullW === 0 || fullH === 0) {
+          const minX = Math.min(...standaloneSlices.map(s => s.minX));
+          const maxX = Math.max(...standaloneSlices.map(s => s.maxX));
+          const minY = Math.min(...standaloneSlices.map(s => s.minY));
+          const maxY = Math.max(...standaloneSlices.map(s => s.maxY));
+          fullW = maxX - minX;
+          fullH = maxY - minY;
+          originX = minX + (fullW / 2.0);
+          originY = minY + (fullH / 2.0);
+        }
+
+        const rootTotalTime = rootScene.getAttribute('totalTime') || '3000';
+        const rootFps = rootScene.getAttribute('fps') || '60';
+
+        standaloneSlices.forEach(item => {
+          const s = item.shape;
+          const parent = s.parentNode;
+          if (!parent) return;
+
+          const cx = item.tw / 2.0;
+          const cy = item.th / 2.0;
+          const mediaLocX = cx + (originX - item.lx);
+          const mediaLocY = cy + (originY - item.ly);
+
+          const sId = s.getAttribute('id') || '1';
+          const sLabel = s.getAttribute('label') || `Slice ${sId}`;
+          const sStartTime = s.getAttribute('startTime') || '0';
+          const sEndTime = s.getAttribute('endTime') || rootTotalTime;
+
+          const es = doc.createElement('embedScene');
+          es.setAttribute('id', sId);
+          es.setAttribute('label', sLabel);
+          es.setAttribute('startTime', sStartTime);
+          es.setAttribute('endTime', sEndTime);
+          es.setAttribute('fillType', 'intrinsic');
+
+          // Outer transform (preserves movement keyframes/location, sets scale to 1.0)
+          const origTransform = s.querySelector('transform');
+          if (origTransform) {
+            const clonedTransform = origTransform.cloneNode(true);
+            const scaleNode = clonedTransform.querySelector('scale');
+            if (scaleNode) {
+              scaleNode.setAttribute('value', '1.000000,1.000000');
+            }
+            es.appendChild(clonedTransform);
+          }
+
+          // Outer effects (flip3, cube2, box, etc.)
+          const origEffects = Array.from(s.querySelectorAll('effect'));
+          origEffects.forEach(eff => es.appendChild(eff.cloneNode(true)));
+
+          const fc = doc.createElement('fillColor');
+          fc.setAttribute('value', '#FF000000');
+          es.appendChild(fc);
+
+          // Inner Scene
+          const sc = doc.createElement('scene');
+          sc.setAttribute('title', '');
+          sc.setAttribute('width', String(Math.round(item.tw)));
+          sc.setAttribute('height', String(Math.round(item.th)));
+          sc.setAttribute('exportWidth', String(Math.round(item.tw)));
+          sc.setAttribute('exportHeight', String(Math.round(item.th)));
+          sc.setAttribute('bgcolor', '#00000000');
+          sc.setAttribute('totalTime', sEndTime);
+          sc.setAttribute('fps', rootFps);
+          sc.setAttribute('modifiedTime', '0');
+          sc.setAttribute('amver', '868');
+          sc.setAttribute('ffver', '107');
+          sc.setAttribute('am', 'com.alightcreative.motion/6.2.59');
+          sc.setAttribute('amplatform', 'ios');
+          sc.setAttribute('precompose', 'dynamicResolution');
+          sc.setAttribute('retime', 'off');
+
+          // Inner Shape 1: Offset full media
+          const sh1 = doc.createElement('shape');
+          sh1.setAttribute('id', '1');
+          sh1.setAttribute('label', `${sLabel} Media`);
+          sh1.setAttribute('startTime', '0');
+          sh1.setAttribute('endTime', sEndTime);
+          sh1.setAttribute('fillType', 'media');
+          if (isVideo) {
+            sh1.setAttribute('fillVideo', mediaUri);
+          } else {
+            sh1.setAttribute('fillImage', mediaUri);
+          }
+          sh1.setAttribute('mediaFillMode', 'fill');
+          sh1.setAttribute('s', '.rect');
+
+          const sh1Trans = doc.createElement('transform');
+          const sh1Loc = doc.createElement('location');
+          sh1Loc.setAttribute('value', `${mediaLocX.toFixed(6)},${mediaLocY.toFixed(6)},0.000000`);
+          sh1Trans.appendChild(sh1Loc);
+          sh1.appendChild(sh1Trans);
+
+          const sh1Size = doc.createElement('property');
+          sh1Size.setAttribute('name', 'size');
+          sh1Size.setAttribute('type', 'vec2');
+          sh1Size.setAttribute('value', `${(fullW / 2.0).toFixed(6)},${(fullH / 2.0).toFixed(6)}`);
+          sh1.appendChild(sh1Size);
+
+          sc.appendChild(sh1);
+
+          // Inner Shape 2: Mask stencil
+          const sh2 = doc.createElement('shape');
+          sh2.setAttribute('id', '2');
+          sh2.setAttribute('label', `${sLabel} Mask`);
+          sh2.setAttribute('startTime', '0');
+          sh2.setAttribute('endTime', sEndTime);
+          sh2.setAttribute('fillType', 'color');
+          sh2.setAttribute('blending', 'mask');
+          sh2.setAttribute('s', '.rect');
+
+          const sh2Trans = doc.createElement('transform');
+          const sh2Loc = doc.createElement('location');
+          sh2Loc.setAttribute('value', `${cx.toFixed(6)},${cy.toFixed(6)},0.000000`);
+          const sh2Scale = doc.createElement('scale');
+          sh2Scale.setAttribute('value', `${(item.tw / 200.0).toFixed(6)},${(item.th / 200.0).toFixed(6)}`);
+          sh2Trans.appendChild(sh2Loc);
+          sh2Trans.appendChild(sh2Scale);
+          sh2.appendChild(sh2Trans);
+
+          const sh2Fc = doc.createElement('fillColor');
+          sh2Fc.setAttribute('value', '#FFFFFFFF');
+          sh2.appendChild(sh2Fc);
+
+          sc.appendChild(sh2);
+          es.appendChild(sc);
+
+          // Drop-in replacement
+          parent.replaceChild(es, s);
+        });
+      }
+    }
 
     // Top-level <media> tag in root <scene>
     let mediaElem = rootScene.querySelector(':scope > media') || rootScene.querySelector('media');
@@ -2917,6 +3169,17 @@
       btn.addEventListener('click', () => {
         converterState.mediaType = btn.dataset.value;
         updateMediaTypeToggleUI();
+        updateTransformedXmlOutput();
+      });
+    });
+  }
+
+  // Mask Slicing Alignment Toggle
+  if (maskSlicingToggle) {
+    maskSlicingToggle.querySelectorAll('.toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        converterState.maskSlicing = btn.dataset.value;
+        updateMaskSlicingToggleUI();
         updateTransformedXmlOutput();
       });
     });

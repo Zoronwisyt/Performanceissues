@@ -199,7 +199,7 @@
                   Masking Mode
                 </button>
               </div>
-              <div class="control-hint">Masking separates into distinct 4:5 rectangles instead of wipe effect</div>
+              <div class="control-hint">Masking separates into distinct 4:5 rectangles with connected Group &amp; Mask image slicing</div>
             </div>
 
             <!-- Masking Configuration Card -->
@@ -215,9 +215,9 @@
                 <label>Alight Motion Grouping</label>
                 <div class="toggle-group" id="maskGroupToggle">
                   <button class="toggle-btn active" data-value="embed">EmbedScene Group</button>
-                  <button class="toggle-btn" data-value="direct">Direct Shapes</button>
+                  <button class="toggle-btn" data-value="direct">Direct Slices</button>
                 </div>
-                <div class="control-hint">EmbedScene wraps slices into a sub-scene matching Project 294</div>
+                <div class="control-hint">EmbedScene wraps all slice groups into a master scene matching Project 294</div>
               </div>
             </div>
 
@@ -832,6 +832,18 @@
                 <input type="text" id="targetMediaUri" value="am-internal:///79E80CB55B8662B05AFDC24DB42B814BC455410A.PNG" placeholder="am-internal:///...">
               </div>
               <div class="control-hint">This internal URI prompts Alight Motion to ask you to "Replace Media" when opening the XML in the app</div>
+            </div>
+
+            <div class="control-group" id="maskSlicingControlGroup">
+              <label>
+                Mask Slicing Alignment
+                <span class="badge" id="maskSlicingBadge" style="background: rgba(0, 240, 255, 0.15); color: var(--cyan); font-size: 10px;">AUTO-CONNECT</span>
+              </label>
+              <div class="toggle-group" id="maskSlicingToggle">
+                <button class="toggle-btn active" data-value="connect" type="button">Connect Full Image (Slices)</button>
+                <button class="toggle-btn" data-value="individual" type="button">Repeat Image Per Shape</button>
+              </div>
+              <div class="control-hint">Slices media across mask tiles so the full image connects together seamlessly (Group &amp; Mask architecture)</div>
             </div>
 
             <div class="control-group">
